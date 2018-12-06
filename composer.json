@@ -1,0 +1,9 @@
+{
+    "require": {
+        "microsoft/azure-storage-blob": "*",
+        "microsoft/azure-storage-queue": "*",
+        "monolog/monolog": "*",
+        "ercorp/ms-application-insights-monolog": "dev-master"
+    },
+    "minimum-stability": "dev"
+}
