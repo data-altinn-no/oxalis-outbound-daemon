@@ -1,3 +1,3 @@
-#!/usr/bin/php
+#!/bin/sh
 
-php daemon.php
+php oxalis-outbound-daemon.php

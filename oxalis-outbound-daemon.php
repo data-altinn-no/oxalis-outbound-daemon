@@ -102,7 +102,7 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     Logger()->debug("Saving XML to temporary file", [$tmpfile]);
     file_put_contents($tmpfile, $ehfXml);
 
-    [$sender, $receiver] = GetSenderReceiverFromXml($ehfXml);
+    [$receiver,$sender] = GetSenderReceiverFromXml($ehfXml);
     $cmd = sprintf("%s -f %s -s %s -r %s", OXALIS_STANDALONE, escapeshellarg($tmpfile), escapeshellarg($sender), escapeshellarg($receiver));
 
     Logger()->info("Executing oxalis-standalone", [$cmd]);
@@ -193,7 +193,7 @@ function LoadConfigFromEnvironment() {
 
     define('STORAGE_ACCOUNT_CONNECTION_STRING', $connectionString);
     define('INSIGHTS_INSTRUMENTATION_KEY', $instrumentationKey);
-    define('OXALIS_STANDALONE', getenv('OXALIS_STANDALONE') ?: '/oxalis/bin/oxalis-standalone');
+    define('OXALIS_STANDALONE', getenv('OXALIS_STANDALONE') ?: 'java -jar /oxalis/bin/oxalis-standalone.jar');
     define('BLOB_ARCHIVED', getenv('OUTBOUND_AZURE_BLOB_ARCHIVED') ?: 'archived');
     define('BLOB_FAILED', getenv('OUTBOUND_AZURE_BLOB_FAILED') ?: 'failed');
     define('QUEUE_OUTBOUND', getenv('OUTBOUND_AZURE_QUEUE_OUTBOUND') ?: 'outbound');
