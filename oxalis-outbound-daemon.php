@@ -52,6 +52,15 @@ while (true) {
         DeleteXmlBlob($blobClient, $message);
         DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
     }
+    catch (OxalisStandaloneException $e) {
+        // To avoid head-of-line blocking, delete it from the queue
+        // FIXME! This required additional attempts
+        DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
+    }
+    catch (IOException $e) {
+        // This requires user intervention, just sleep for 60 seconds to avoid filling the logs
+        sleep(60);
+    }
 
     sleep(1);
 }
@@ -102,15 +111,46 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     Logger()->debug("Saving XML to temporary file", [$tmpfile]);
     file_put_contents($tmpfile, $ehfXml);
 
+    $evidenceDir = tempnam(sys_get_temp_dir(), "evidence");
+    if (!@mkdir($evidenceDir, true)) {
+        Logger()->error("Failed to create temporary directory for evidence");
+        throw new IOException();
+    }
+    Logger()->debug("Created temporary directory for evidence", [$evidenceDir]);
+
     [$receiver,$sender] = GetSenderReceiverFromXml($ehfXml);
-    $cmd = sprintf("%s -f %s -s %s -r %s", OXALIS_STANDALONE, escapeshellarg($tmpfile), escapeshellarg($sender), escapeshellarg($receiver));
+    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -repeat %d", 
+        OXALIS_STANDALONE, 
+        escapeshellarg($tmpfile), 
+        escapeshellarg($sender), 
+        escapeshellarg($receiver),
+        $evidenceDir,
+        3 // repeat count
+    );
 
     Logger()->info("Executing oxalis-standalone", [$cmd]);
 
+    exec($cmd, $output, $return_code);
+
+    if ($return_code != 0) {
+        Logger()->error("Failed to run oxalis-standalone, got return code $return code", ["output" => join("\n", $output)]);
+        throw new OxalisStandaloneException();
+    }
+
+    $evidence = glob($evidenceDir . "/*");
+    if (!count($evidence) || !is_readable($evidence[0])) {
+        Logger()->error("oxalis-standalone did not create a readable evidence in $evidenceDir as requested", ["output" => join("\n", $output)]);
+        throw new OxalisStandaloneException();
+    }
+    $evidenceContents = file_get_contents($evidence[0]);
+
     Logger()->debug("Deleting temporary file", [$tmpfile]);
     unlink($tmpfile);
+    Logger()->debug("Deleting temporary evidence directory", [$tmpfile]);
+    unlink($evidence[0]);
+    rmdir($evidenceDir);
 
-    return "receipt " . date('YmdHis');
+    return $evidenceContents;
 }
 
 function UploadReceipt($blobClient, $receipt, $message, $archiveContainer) {
@@ -177,16 +217,16 @@ function GetSenderReceiverFromXml($ehfXml) {
 function LoadConfigFromEnvironment() {
 
     $connectionString = null;
-    if (!($connectionString = getenv('OUTBOUND_AZURE_STORAGE_ACCOUNT_CONNECTION_STRING'))) {
+    if (!($connectionString = getenv('AZURE_STORAGE_ACCOUNT_CONNECTION_STRING'))) {
         if (!file_exists(__DIR__ . "/connectionstring.txt") || !($connectionString = trim(file_get_contents(__DIR__ . "/connectionstring.txt")))) {
-            echo "ConnectionString to storage account must be set via the OUTBOUND_AZURE_STORAGE_ACCOUNT_CONNECTION_STRING environment variable or placed in the file connectionstring.txt\n";
+            echo "ConnectionString to storage account must be set via the AZURE_STORAGE_ACCOUNT_CONNECTION_STRING environment variable or placed in the file connectionstring.txt\n";
             exit(1);
         }
     }
     $instrumentationKey = null;
     if (!($instrumentationKey = getenv('OUTBOUND_AZURE_INSIGHTS_INSTRUMENTATION_KEY'))) {
         if (!file_exists(__DIR__ . "/instrumentationkey.txt") || !($instrumentationKey = trim(file_get_contents(__DIR__ . "/instrumentationkey.txt")))) {
-            echo "Application Insights instrumentation key must be set in the OUTBOUND_AZURE_INSIGHTS_INSTRUMENTATION_KEY environment variable or placed in the file connectionstring.txt.\n";
+            echo "Application Insights instrumentation key must be set in the OUTBOUND_AZURE_INSIGHTS_INSTRUMENTATION_KEY environment variable or placed in the file instrumentationkey.txt.\n";
             exit(1);
         }
     }
@@ -228,3 +268,5 @@ function Telemetry() {
 
 
 class InvalidXmlException extends \Exception {}
+class OxalisStandaloneException extends \Exception {}
+class IOException extends \Exception {}
