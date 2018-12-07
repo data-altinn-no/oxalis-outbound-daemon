@@ -125,7 +125,7 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     Logger()->debug("Created temporary directory for evidence", [$evidenceDir]);
 
     [$receiver,$sender] = GetSenderReceiverFromXml($ehfXml);
-    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s -u http://localhost:8080/as2", 
+    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s", 
         OXALIS_STANDALONE, 
         escapeshellarg($tmpfile), 
         escapeshellarg($sender), 
