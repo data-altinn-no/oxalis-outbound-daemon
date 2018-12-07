@@ -17,6 +17,9 @@ LoadConfigFromEnvironment();
 $queueClient = QueueRestProxy::createQueueService(STORAGE_ACCOUNT_CONNECTION_STRING);
 $blobClient = BlobRestProxy::createBlobService(STORAGE_ACCOUNT_CONNECTION_STRING);
 
+
+Logger()->debug("Polling for new messages ...");
+
 while (true) {
 
     try {
@@ -34,7 +37,7 @@ while (true) {
             DeleteXmlBlob($blobClient, $message);
             DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
             // Disabled pending release with this fix: https://github.com/Microsoft/ApplicationInsights-PHP/commit/675ebd57b71702542770799325cd7677f1f143aa
-            //Telemetry()->trackMetric("messageProcessTime", microtime(true) - $starttime, Data_Point_Type::Measurement);
+	    //Telemetry()->trackMetric("messageProcessTime", microtime(true) - $starttime, Data_Point_Type::Measurement);
         }
     }
     catch (ServiceException $e) {
@@ -57,9 +60,12 @@ while (true) {
         // FIXME! This required additional attempts
         DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
     }
-    catch (IOException $e) {
+    catch (IOException $e) {	    
         // This requires user intervention, just sleep for 60 seconds to avoid filling the logs
         sleep(60);
+    }
+    finally {
+	if (!empty($messages)) Logger()->debug("Polling for new messages ...");
     }
 
     sleep(1);
@@ -68,7 +74,6 @@ while (true) {
 //////////////////////////////////////////////////////////////////////////////////////////
 
 function GetQueueMessages($queueClient, $queueName) {
-    Logger()->debug("Polling for new messages");
 
     $message_options = new \MicrosoftAzure\Storage\Queue\Models\ListMessagesOptions();
     $message_options->setNumberOfMessages(10);
@@ -107,25 +112,26 @@ function DownloadXmlBlobFromQueueMessage($blobClient, $message) {
 }
 
 function SendEhfViaOxalisStandalone($ehfXml) {
-    $tmpfile = tempnam(sys_get_temp_dir(), 'ehf');
+    $randstr = md5(uniqid("", true));
+    $tmpfile = tempnam(sys_get_temp_dir(), 'ehf' . $randstr);
     Logger()->debug("Saving XML to temporary file", [$tmpfile]);
     file_put_contents($tmpfile, $ehfXml);
 
-    $evidenceDir = tempnam(sys_get_temp_dir(), "evidence");
-    if (!@mkdir($evidenceDir, true)) {
+    $evidenceDir = sys_get_temp_dir() . "/evidence" . $randstr;
+    if (@!mkdir($evidenceDir, true)) {
         Logger()->error("Failed to create temporary directory for evidence");
         throw new IOException();
     }
     Logger()->debug("Created temporary directory for evidence", [$evidenceDir]);
 
     [$receiver,$sender] = GetSenderReceiverFromXml($ehfXml);
-    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -repeat %d", 
+    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s -u http://localhost:8080/as2", 
         OXALIS_STANDALONE, 
         escapeshellarg($tmpfile), 
         escapeshellarg($sender), 
         escapeshellarg($receiver),
-        $evidenceDir,
-        3 // repeat count
+	escapeshellarg($evidenceDir),	
+	escapeshellarg(PEPPOL_CERT_PATH)
     );
 
     Logger()->info("Executing oxalis-standalone", [$cmd]);
@@ -142,12 +148,17 @@ function SendEhfViaOxalisStandalone($ehfXml) {
         Logger()->error("oxalis-standalone did not create a readable evidence in $evidenceDir as requested", ["output" => join("\n", $output)]);
         throw new OxalisStandaloneException();
     }
-    $evidenceContents = file_get_contents($evidence[0]);
+
+    $evidenceContents = "";
+    foreach ($evidence as $evidenceFile) {
+	Logger()->debug("Getting receipt evidence from $evidenceFile");
+	$evidenceContents .= file_get_contents($evidenceFile);
+	unlink($evidenceFile);
+    }
 
     Logger()->debug("Deleting temporary file", [$tmpfile]);
     unlink($tmpfile);
     Logger()->debug("Deleting temporary evidence directory", [$tmpfile]);
-    unlink($evidence[0]);
     rmdir($evidenceDir);
 
     return $evidenceContents;
@@ -159,13 +170,15 @@ function UploadReceipt($blobClient, $receipt, $message, $archiveContainer) {
 
     $tmpfile = tempnam(sys_get_temp_dir(), 'ehfreceipt');
     Logger()->debug("Saving receipt to temporary file", [$tmpfile]);
+    file_put_contents($tmpfile, $receipt);
 
-    $receiptFileName = $fileName . "_receipt.dat";
+    $receiptFileName = $fileName . "_receipt.xml";
     Logger()->info("Uploading receipt", [$receiptFileName]);
 
     $blobClient->createBlockBlob($archiveContainer, $receiptFileName, fopen($tmpfile, "r"));
 
     Logger()->debug("Deleting temporary file", [$tmpfile]);
+    unlink($tmpfile);
 }
 
 function DeleteXmlBlob($blobClient, $message) {
@@ -231,8 +244,15 @@ function LoadConfigFromEnvironment() {
         }
     }
 
+    $peppolCertPath = null;
+    if (!($peppolCertPath = getenv('PEPPOL_CERT_PATH'))) {
+	echo "PEPPOL_CERT_PATH not set\n";
+	exit(1);
+    }
+
     define('STORAGE_ACCOUNT_CONNECTION_STRING', $connectionString);
     define('INSIGHTS_INSTRUMENTATION_KEY', $instrumentationKey);
+    define('PEPPOL_CERT_PATH', $peppolCertPath);
     define('OXALIS_STANDALONE', getenv('OXALIS_STANDALONE') ?: 'java -jar /oxalis/bin/oxalis-standalone.jar');
     define('BLOB_ARCHIVED', getenv('OUTBOUND_AZURE_BLOB_ARCHIVED') ?: 'archived');
     define('BLOB_FAILED', getenv('OUTBOUND_AZURE_BLOB_FAILED') ?: 'failed');
