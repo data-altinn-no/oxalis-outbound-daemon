@@ -139,7 +139,7 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     exec($cmd, $output, $return_code);
 
     if ($return_code != 0) {
-        Logger()->error("Failed to run oxalis-standalone, got return code $return code", ["output" => join("\n", $output)]);
+        Logger()->error("Failed to run oxalis-standalone, got return code $return_code", ["output" => join("\n", $output)]);
         throw new OxalisStandaloneException();
     }
 
