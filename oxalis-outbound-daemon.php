@@ -124,8 +124,8 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     }
     Logger()->debug("Created temporary directory for evidence", [$evidenceDir]);
 
-    [$receiver,$sender] = GetSenderReceiverFromXml($ehfXml);
-    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s", 
+    [$sender,$receiver] = GetSenderReceiverFromXml($ehfXml);
+    $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s --protocol peppol-transport-as4-v2_0",
         OXALIS_STANDALONE, 
         escapeshellarg($tmpfile), 
         escapeshellarg($sender), 
@@ -212,19 +212,13 @@ function GetSenderReceiverFromXml($ehfXml) {
         throw $e;
     }
 
-    $receiver = $sxe->xpath('//cac:ContractingParty[1]/cac:Party/cac:PartyIdentification/cbc:ID');
-    $sender = $sxe->xpath('//resp:PartyIdentification[1]/resp:ID');
-
-    if (empty($receiver[0]) || empty($sender[0])) {
-        $e = new InvalidXmlException("Unable to parse XML: unable to find parties");
+    if (empty($sxe->StandardBusinessDocumentHeader->Sender->Identifier) || empty($sxe->StandardBusinessDocumentHeader->Receiver->Identifier)) {
+        $e = new Exception("Unable to parse XML: unable to find parties. Is this a proper SBD?");
         Logger()->error("Unable to parse XML", ["reason" => "nopartiesfound", "errors" => $errors, "xml" => $ehfXml, "exception" => $e]);
         throw $e;
     }
 
-    $receiverIdentifier = $receiver[0]->attributes()->schemeID . ":" . ((string) $receiver[0]);
-    $senderIdentifier = $sender[0]->attributes()->schemeID . ":" . ((string) $sender[0]);
-
-    return [$receiverIdentifier, $senderIdentifier];
+    return [(string)$sxe->StandardBusinessDocumentHeader->Sender->Identifier, (string)$sxe->StandardBusinessDocumentHeader->Receiver->Identifier];
 }
 
 function LoadConfigFromEnvironment() {
