@@ -194,8 +194,10 @@ function GetMessageTextObject($message) {
 }
 
 function GetContainerAndBlobNameFromUrl($url) {
-    $parts = parse_url($url, PHP_URL_PATH);
-    return explode("/", substr($parts, 1));
+    $path = parse_url($url, PHP_URL_PATH);
+    $parts = explode("/", substr($path, 1));
+    $container = array_shift($parts);
+    return [$container, join("/", $parts)];
 }
 
 function GetSenderReceiverFromXml($ehfXml) {
