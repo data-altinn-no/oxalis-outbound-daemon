@@ -34,10 +34,15 @@ while (true) {
             $ehfXml = DownloadXmlBlobFromQueueMessage($blobClient, $message);
             $receipt = SendEhfViaOxalisStandalone($ehfXml);
             UploadReceipt($blobClient, $receipt, $message, BLOB_ARCHIVED);
-            DeleteXmlBlob($blobClient, $message);
             DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
+            if (AFTER_COMPLETED == "delete") {
+                DeleteXmlBlob($blobClient, $message);
+            }
+            else if (AFTER_COMPLETED == "move") {
+                MoveXmlBlob($blobClient, $message, BLOB_ARCHIVED);
+            }
             // Disabled pending release with this fix: https://github.com/Microsoft/ApplicationInsights-PHP/commit/675ebd57b71702542770799325cd7677f1f143aa
-	    //Telemetry()->trackMetric("messageProcessTime", microtime(true) - $starttime, Data_Point_Type::Measurement);
+            //Telemetry()->trackMetric("messageProcessTime", microtime(true) - $starttime, Data_Point_Type::Measurement);
         }
     }
     catch (ServiceException $e) {
@@ -51,9 +56,14 @@ while (true) {
         }
     }
     catch (InvalidXmlException $e) {
-        // The exceptions and failing XML is already logged at this point, so just delete and move on
-        DeleteXmlBlob($blobClient, $message);
+        // The exceptions and failing XML is already logged at this point
         DeleteQueueMessage($queueClient, QUEUE_OUTBOUND, $message);
+        if (AFTER_FAILED == "delete") {
+            DeleteXmlBlob($blobClient, $message);
+        }
+        else if (AFTER_FAILED == "move") {
+            MoveXmlBlob($blobClient, $message, BLOB_FAILED);
+        }
     }
     catch (OxalisStandaloneException $e) {
         // To avoid head-of-line blocking, delete it from the queue
@@ -124,14 +134,23 @@ function SendEhfViaOxalisStandalone($ehfXml) {
     }
     Logger()->debug("Created temporary directory for evidence", [$evidenceDir]);
 
-    [$sender,$receiver] = GetSenderReceiverFromXml($ehfXml);
+    try {
+        [$sender,$receiver] = GetSenderReceiverFromXml($ehfXml);
+    }
+    catch (\Exception $e) {
+        Logger()->debug("Execption thrown, cleaning up temporary files");
+        unlink($tmpfile);
+        rmdir($evidenceDir);
+        throw $e;
+    }
+
     $cmd = sprintf("%s -f %s -s %s -r %s -e %s -cert %s --protocol peppol-transport-as4-v2_0",
         OXALIS_STANDALONE, 
-        escapeshellarg($tmpfile), 
-        escapeshellarg($sender), 
+        escapeshellarg($tmpfile),
+        escapeshellarg($sender),
         escapeshellarg($receiver),
-	escapeshellarg($evidenceDir),	
-	escapeshellarg(PEPPOL_CERT_PATH)
+        escapeshellarg($evidenceDir),
+        escapeshellarg(PEPPOL_CERT_PATH)
     );
 
     Logger()->info("Executing oxalis-standalone", [$cmd]);
@@ -151,9 +170,9 @@ function SendEhfViaOxalisStandalone($ehfXml) {
 
     $evidenceContents = "";
     foreach ($evidence as $evidenceFile) {
-	Logger()->debug("Getting receipt evidence from $evidenceFile");
-	$evidenceContents .= file_get_contents($evidenceFile);
-	unlink($evidenceFile);
+        Logger()->debug("Getting receipt evidence from $evidenceFile");
+        $evidenceContents .= file_get_contents($evidenceFile);
+        unlink($evidenceFile);
     }
 
     Logger()->debug("Deleting temporary file", [$tmpfile]);
@@ -185,7 +204,18 @@ function DeleteXmlBlob($blobClient, $message) {
     $blobRef = GetMessageTextObject($message);
     [$container, $fileName] = GetContainerAndBlobNameFromUrl($blobRef->data->url);
 
-    Logger()->info("Deleting XML from blob storage", [$fileName]);
+    Logger()->info("Deleting from blob storage", [$fileName]);
+    $blobClient->deleteBlob($container, $fileName);
+}
+
+function MoveXmlBlob($blobClient, $message, $targetContainer) {
+    $blobRef = GetMessageTextObject($message);
+    [$container, $fileName] = GetContainerAndBlobNameFromUrl($blobRef->data->url);
+
+    Logger()->info("Copying from blob storage to $targetContainer", [$fileName, $targetContainer]);
+    $blobClient->copyBlob($targetContainer, $fileName, $container, $fileName);
+
+    Logger()->info("Deleting original from $container", [$fileName]);
     $blobClient->deleteBlob($container, $fileName);
 }
 
@@ -241,9 +271,24 @@ function LoadConfigFromEnvironment() {
     }
 
     $peppolCertPath = null;
-    if (!($peppolCertPath = getenv('PEPPOL_CERT_PATH'))) {
-	echo "PEPPOL_CERT_PATH not set\n";
-	exit(1);
+        if (!($peppolCertPath = getenv('PEPPOL_CERT_PATH'))) {
+        echo "PEPPOL_CERT_PATH not set\n";
+        exit(1);
+    }
+
+    $afterCompleted = getenv('AFTER_COMPLETED');
+    if (!in_array($afterCompleted, ["delete", "move", "noop"])) {
+        $afterCompleted = "move";
+    }
+
+    $afterFailed = getenv('AFTER_FAILED');
+    if (!in_array($afterFailed, ["delete", "move", "noop"])) {
+        $afterFailed = "move";
+    }
+
+    $loglevel = getenv('LOGLEVEL');
+    if (!in_array($loglevel, ['debug','info','notice','warning','error'])) {
+        $loglevel = "error";
     }
 
     define('STORAGE_ACCOUNT_CONNECTION_STRING', $connectionString);
@@ -253,6 +298,17 @@ function LoadConfigFromEnvironment() {
     define('BLOB_ARCHIVED', getenv('OUTBOUND_AZURE_BLOB_ARCHIVED') ?: 'archived');
     define('BLOB_FAILED', getenv('OUTBOUND_AZURE_BLOB_FAILED') ?: 'failed');
     define('QUEUE_OUTBOUND', getenv('OUTBOUND_AZURE_QUEUE_OUTBOUND') ?: 'outbound');
+    define('AFTER_COMPLETED', $afterCompleted);
+    define('AFTER_FAILED', $afterFailed);
+    define('LOGLEVEL', $loglevel);
+
+    echo "--- CONFIGURATION --- \n";
+    $defined = get_defined_constants(true);
+    foreach ($defined["user"] as $k => $v) {
+        echo "$k = $v\n";
+    }
+    echo "\n";
+
 }
 
 function Logger() {
@@ -263,8 +319,19 @@ function Logger() {
     }
 
     $logger = new Logger('default');
+
+    switch (LOGLEVEL) {
+        case "debug": $level = Logger::DEBUG; break;
+        case "info": $level = Logger::INFO; break;
+        case "notice": $level = Logger::NOTICE; break;
+        case "warning": $level = Logger::WARNING; break;
+        case "error": $level = Logger::ERROR; break;
+        default: $level = Logger::ERROR; break;
+    }
+
+    $level = Logger::DEBUG;
     $logger->pushHandler(new \Monolog\Handler\ErrorLogHandler());
-    $logger->pushHandler(new \ER\MSApplicationInsightsMonolog\MSApplicationInsightsHandler(Telemetry()));
+    $logger->pushHandler(new \ER\MSApplicationInsightsMonolog\MSApplicationInsightsHandler(Telemetry(), $level));
 
     return $logger;
 }
@@ -280,6 +347,7 @@ function Telemetry() {
     $client->getContext()->setInstrumentationKey(INSIGHTS_INSTRUMENTATION_KEY);
 
     return $client;
+
 }
 
 
