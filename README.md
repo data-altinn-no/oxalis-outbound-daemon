@@ -1,3 +1,5 @@
+> Note! This repository is not maintained and may contain vulnerabilities. Handle with care.
+
 # oxalis-outbound-daemon
 
 ## About
